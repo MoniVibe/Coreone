@@ -1,0 +1,260 @@
+// system_integrate.hpp
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace engine::components {
+    struct TransformSoA;
+    struct VelocitySoA;
+}
+
+namespace engine::systems {
+
+// Range for chunk processing
+struct Range {
+    size_t begin;
+    size_t end;
+    
+    size_t size() const { return end - begin; }
+};
+
+// Integration system for position updates
+class IntegrateMotion {
+public:
+    enum Mode {
+        MODE_SCALAR,
+        MODE_SIMD,
+        MODE_AUTO  // Choose based on availability
+    };
+    
+    IntegrateMotion();
+    ~IntegrateMotion() = default;
+    
+    // Set processing mode
+    void setMode(Mode m) { mode = m; }
+    Mode getMode() const { return mode; }
+    
+    // Process full arrays
+    void integrate(components::TransformSoA& transforms,
+                  const components::VelocitySoA& velocities,
+                  float dt);
+    
+    // Process range (for parallel execution)
+    void integrateRange(components::TransformSoA& transforms,
+                       const components::VelocitySoA& velocities,
+                       const Range& range,
+                       float dt);
+    
+    // Compute checksum for determinism testing
+    static uint64_t computeChecksum(const components::TransformSoA& transforms);
+    
+    // Get statistics
+    struct Stats {
+        size_t entities_processed = 0;
+        size_t simd_iterations = 0;
+        size_t scalar_iterations = 0;
+        double last_ms = 0.0;
+    };
+    
+    const Stats& getStats() const { return stats; }
+    void resetStats() { stats = Stats{}; }
+    
+private:
+    // Implementation functions
+    void integrateScalar(float* posX, float* posY, float* posZ,
+                        const float* vx, const float* vy, const float* vz,
+                        size_t begin, size_t end, float dt);
+    
+    void integrateSIMD(float* posX, float* posY, float* posZ,
+                      const float* vx, const float* vy, const float* vz,
+                      size_t begin, size_t end, float dt);
+    
+    Mode mode;
+    Stats stats;
+};
+
+} // namespace engine::systems
+
+// -----------------------------------------------------------
+// system_integrate.cpp
+#include "system_integrate.hpp"
+#include "../components/transform_soa.hpp"
+#include "../components/velocity_soa.hpp"
+#include "../simd/simd.hpp"
+#include <chrono>
+#include <cassert>
+
+namespace engine::systems {
+
+IntegrateMotion::IntegrateMotion() : mode(MODE_AUTO) {
+    // Auto-select based on SIMD availability
+    #if defined(SIMD_AVX2) || defined(SIMD_SSE2)
+        mode = MODE_SIMD;
+    #else
+        mode = MODE_SCALAR;
+    #endif
+}
+
+void IntegrateMotion::integrate(components::TransformSoA& transforms,
+                                const components::VelocitySoA& velocities,
+                                float dt) {
+    assert(transforms.size() == velocities.size());
+    
+    Range range{0, transforms.size()};
+    integrateRange(transforms, velocities, range, dt);
+}
+
+void IntegrateMotion::integrateRange(components::TransformSoA& transforms,
+                                     const components::VelocitySoA& velocities,
+                                     const Range& range,
+                                     float dt) {
+    if (range.size() == 0) return;
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // Get raw pointers
+    float* posX = transforms.posX;
+    float* posY = transforms.posY;
+    float* posZ = transforms.posZ;
+    const float* vx = velocities.vx;
+    const float* vy = velocities.vy;
+    const float* vz = velocities.vz;
+    
+    // Choose integration method
+    bool use_simd = (mode == MODE_SIMD) || 
+                   (mode == MODE_AUTO && (SIMD_WIDTH > 1));
+    
+    if (use_simd) {
+        integrateSIMD(posX, posY, posZ, vx, vy, vz, range.begin, range.end, dt);
+    } else {
+        integrateScalar(posX, posY, posZ, vx, vy, vz, range.begin, range.end, dt);
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = end - start;
+    
+    stats.entities_processed += range.size();
+    stats.last_ms = elapsed.count();
+}
+
+void IntegrateMotion::integrateScalar(float* posX, float* posY, float* posZ,
+                                      const float* vx, const float* vy, const float* vz,
+                                      size_t begin, size_t end, float dt) {
+    for (size_t i = begin; i < end; ++i) {
+        posX[i] += vx[i] * dt;
+        posY[i] += vy[i] * dt;
+        posZ[i] += vz[i] * dt;
+        stats.scalar_iterations++;
+    }
+}
+
+void IntegrateMotion::integrateSIMD(float* posX, float* posY, float* posZ,
+                                    const float* vx, const float* vy, const float* vz,
+                                    size_t begin, size_t end, float dt) {
+#if defined(SIMD_AVX2)
+    // Process 8 at a time with AVX2
+    size_t simd_end = begin + ((end - begin) & ~7);
+    __m256 vdt = _mm256_set1_ps(dt);
+    
+    for (size_t i = begin; i < simd_end; i += 8) {
+        // Load positions
+        __m256 px = _mm256_load_ps(posX + i);
+        __m256 py = _mm256_load_ps(posY + i);
+        __m256 pz = _mm256_load_ps(posZ + i);
+        
+        // Load velocities
+        __m256 vx_vec = _mm256_load_ps(vx + i);
+        __m256 vy_vec = _mm256_load_ps(vy + i);
+        __m256 vz_vec = _mm256_load_ps(vz + i);
+        
+        // Integrate: pos += vel * dt
+        px = _mm256_fmadd_ps(vx_vec, vdt, px);
+        py = _mm256_fmadd_ps(vy_vec, vdt, py);
+        pz = _mm256_fmadd_ps(vz_vec, vdt, pz);
+        
+        // Store results
+        _mm256_store_ps(posX + i, px);
+        _mm256_store_ps(posY + i, py);
+        _mm256_store_ps(posZ + i, pz);
+        
+        stats.simd_iterations += 8;
+    }
+    
+    // Handle remaining with scalar
+    for (size_t i = simd_end; i < end; ++i) {
+        posX[i] += vx[i] * dt;
+        posY[i] += vy[i] * dt;
+        posZ[i] += vz[i] * dt;
+        stats.scalar_iterations++;
+    }
+    
+#elif defined(SIMD_SSE2)
+    // Process 4 at a time with SSE2
+    size_t simd_end = begin + ((end - begin) & ~3);
+    __m128 vdt = _mm_set1_ps(dt);
+    
+    for (size_t i = begin; i < simd_end; i += 4) {
+        // Load positions
+        __m128 px = _mm_load_ps(posX + i);
+        __m128 py = _mm_load_ps(posY + i);
+        __m128 pz = _mm_load_ps(posZ + i);
+        
+        // Load velocities
+        __m128 vx_vec = _mm_load_ps(vx + i);
+        __m128 vy_vec = _mm_load_ps(vy + i);
+        __m128 vz_vec = _mm_load_ps(vz + i);
+        
+        // Integrate: pos += vel * dt
+        px = _mm_add_ps(px, _mm_mul_ps(vx_vec, vdt));
+        py = _mm_add_ps(py, _mm_mul_ps(vy_vec, vdt));
+        pz = _mm_add_ps(pz, _mm_mul_ps(vz_vec, vdt));
+        
+        // Store results
+        _mm_store_ps(posX + i, px);
+        _mm_store_ps(posY + i, py);
+        _mm_store_ps(posZ + i, pz);
+        
+        stats.simd_iterations += 4;
+    }
+    
+    // Handle remaining with scalar
+    for (size_t i = simd_end; i < end; ++i) {
+        posX[i] += vx[i] * dt;
+        posY[i] += vy[i] * dt;
+        posZ[i] += vz[i] * dt;
+        stats.scalar_iterations++;
+    }
+#else
+    // Fallback to scalar
+    integrateScalar(posX, posY, posZ, vx, vy, vz, begin, end, dt);
+#endif
+}
+
+uint64_t IntegrateMotion::computeChecksum(const components::TransformSoA& transforms) {
+    uint64_t hash = 0;
+    
+    // Simple FNV-1a hash of position data
+    const uint64_t FNV_prime = 1099511628211ULL;
+    const uint64_t FNV_offset = 14695981039346656037ULL;
+    
+    hash = FNV_offset;
+    
+    for (size_t i = 0; i < transforms.size(); ++i) {
+        // Hash position components
+        uint32_t* xp = reinterpret_cast<uint32_t*>(&transforms.posX[i]);
+        uint32_t* yp = reinterpret_cast<uint32_t*>(&transforms.posY[i]);
+        uint32_t* zp = reinterpret_cast<uint32_t*>(&transforms.posZ[i]);
+        
+        hash ^= *xp;
+        hash *= FNV_prime;
+        hash ^= *yp;
+        hash *= FNV_prime;
+        hash ^= *zp;
+        hash *= FNV_prime;
+    }
+    
+    return hash;
+}
+
+} // namespace engine::systems

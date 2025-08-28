@@ -1,0 +1,356 @@
+// job_system.hpp
+#pragma once
+
+#include <functional>
+#include <thread>
+#include <vector>
+#include <deque>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <memory>
+
+namespace engine::jobs {
+
+// Range for parallel processing
+struct TaskRange {
+    size_t begin;
+    size_t end;
+    
+    size_t size() const { return end - begin; }
+};
+
+// Task function signature
+using TaskFunction = std::function<void(TaskRange, void*)>;
+
+// Single task
+struct Task {
+    TaskRange range;
+    TaskFunction fn;
+    void* context;
+    
+    Task() : range{0, 0}, fn{}, context{nullptr} {}
+    Task(TaskRange r, TaskFunction f, void* ctx = nullptr)
+        : range(r), fn(f), context(ctx) {}
+};
+
+// Minimal thread pool for job execution
+class JobSystem {
+public:
+    JobSystem();
+    explicit JobSystem(size_t num_threads);
+    ~JobSystem();
+    
+    // Initialize with thread count (0 = hardware_concurrency)
+    void initialize(size_t num_threads = 0);
+    void shutdown();
+    
+    // Submit a single task
+    void submit(const Task& task);
+    
+    // Submit multiple tasks
+    void submit_batch(const std::vector<Task>& tasks);
+    
+    // Submit a range that will be auto-split
+    void submit_range(size_t count, TaskFunction fn, void* context = nullptr);
+    
+    // Wait for all tasks to complete
+    void wait_all();
+    
+    // Get thread count
+    size_t thread_count() const { return workers.size(); }
+    
+    // Get statistics
+    struct Stats {
+        std::atomic<size_t> tasks_submitted{0};
+        std::atomic<size_t> tasks_completed{0};
+        std::atomic<size_t> tasks_stolen{0};
+    };
+    
+    const Stats& get_stats() const { return stats; }
+    void reset_stats();
+    
+private:
+    // Per-thread work queue
+    struct WorkQueue {
+        std::deque<Task> tasks;
+        std::mutex mutex;
+    };
+    
+    // Worker thread function
+    void worker_thread(size_t thread_id);
+    
+    // Try to steal work from other threads
+    bool try_steal_task(size_t thread_id, Task& task);
+    
+    // Thread management
+    std::vector<std::thread> workers;
+    std::vector<std::unique_ptr<WorkQueue>> work_queues;
+    
+    // Global queue for overflow
+    std::queue<Task> global_queue;
+    std::mutex global_mutex;
+    
+    // Synchronization
+    std::condition_variable cv_work;
+    std::condition_variable cv_done;
+    std::mutex cv_mutex;
+    
+    // State
+    std::atomic<bool> running{false};
+    std::atomic<size_t> active_tasks{0};
+    
+    // Statistics
+    Stats stats;
+};
+
+// Global job system instance
+JobSystem& get_job_system();
+
+} // namespace engine::jobs
+
+// ===================================================================
+// job_system.cpp
+// ===================================================================
+
+#include "job_system.hpp"
+#include <algorithm>
+#include <random>
+#include <chrono>
+
+namespace engine::jobs {
+
+// Global instance
+static JobSystem g_job_system;
+
+JobSystem& get_job_system() {
+    return g_job_system;
+}
+
+JobSystem::JobSystem() {
+    // Default: don't initialize until explicitly called
+}
+
+JobSystem::JobSystem(size_t num_threads) {
+    initialize(num_threads);
+}
+
+JobSystem::~JobSystem() {
+    shutdown();
+}
+
+void JobSystem::initialize(size_t num_threads) {
+    if (running.load()) return;  // Already initialized
+    
+    if (num_threads == 0) {
+        num_threads = std::thread::hardware_concurrency();
+        if (num_threads == 0) num_threads = 4;  // Fallback
+    }
+    
+    running = true;
+    workers.reserve(num_threads);
+    work_queues.reserve(num_threads);
+    
+    // Create per-thread queues
+    for (size_t i = 0; i < num_threads; ++i) {
+        work_queues.emplace_back(std::make_unique<WorkQueue>());
+    }
+    
+    // Start worker threads
+    for (size_t i = 0; i < num_threads; ++i) {
+        workers.emplace_back(&JobSystem::worker_thread, this, i);
+    }
+}
+
+void JobSystem::shutdown() {
+    if (!running.load()) return;
+    
+    // Signal shutdown
+    running = false;
+    cv_work.notify_all();
+    
+    // Wait for threads to finish
+    for (auto& thread : workers) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+    
+    workers.clear();
+    work_queues.clear();
+    
+    // Clear any remaining tasks
+    std::queue<Task> empty;
+    std::swap(global_queue, empty);
+}
+
+void JobSystem::submit(const Task& task) {
+    if (!running.load() || !task.fn) return;
+    
+    stats.tasks_submitted++;
+    active_tasks++;
+    
+    // Try to find the least loaded queue
+    size_t best_queue = 0;
+    size_t min_size = SIZE_MAX;
+    
+    for (size_t i = 0; i < work_queues.size(); ++i) {
+        std::unique_lock<std::mutex> lock(work_queues[i]->mutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            size_t size = work_queues[i]->tasks.size();
+            if (size < min_size) {
+                min_size = size;
+                best_queue = i;
+            }
+        }
+    }
+    
+    // Add to best queue or global if all are busy
+    {
+        std::unique_lock<std::mutex> lock(work_queues[best_queue]->mutex, std::try_to_lock);
+        if (lock.owns_lock() && work_queues[best_queue]->tasks.size() < 32) {
+            work_queues[best_queue]->tasks.push_back(task);
+        } else {
+            // Fallback to global queue
+            std::lock_guard<std::mutex> global_lock(global_mutex);
+            global_queue.push(task);
+        }
+    }
+    
+    cv_work.notify_one();
+}
+
+void JobSystem::submit_batch(const std::vector<Task>& tasks) {
+    if (!running.load() || tasks.empty()) return;
+    
+    // Distribute tasks across threads
+    size_t tasks_per_thread = tasks.size() / work_queues.size();
+    size_t remainder = tasks.size() % work_queues.size();
+    
+    size_t task_idx = 0;
+    for (size_t i = 0; i < work_queues.size() && task_idx < tasks.size(); ++i) {
+        size_t count = tasks_per_thread + (i < remainder ? 1 : 0);
+        
+        std::lock_guard<std::mutex> lock(work_queues[i]->mutex);
+        for (size_t j = 0; j < count && task_idx < tasks.size(); ++j) {
+            work_queues[i]->tasks.push_back(tasks[task_idx++]);
+            stats.tasks_submitted++;
+            active_tasks++;
+        }
+    }
+    
+    cv_work.notify_all();
+}
+
+void JobSystem::submit_range(size_t count, TaskFunction fn, void* context) {
+    if (!running.load() || count == 0 || !fn) return;
+    
+    size_t num_workers = workers.size();
+    if (num_workers == 0) return;
+    
+    // Split range into tasks
+    size_t chunk_size = (count + num_workers - 1) / num_workers;
+    
+    std::vector<Task> tasks;
+    tasks.reserve(num_workers);
+    
+    for (size_t i = 0; i < num_workers; ++i) {
+        size_t begin = i * chunk_size;
+        if (begin >= count) break;
+        
+        size_t end = std::min(begin + chunk_size, count);
+        tasks.emplace_back(TaskRange{begin, end}, fn, context);
+    }
+    
+    submit_batch(tasks);
+}
+
+void JobSystem::wait_all() {
+    if (!running.load()) return;
+    
+    std::unique_lock<std::mutex> lock(cv_mutex);
+    cv_done.wait(lock, [this] { return active_tasks.load() == 0; });
+}
+
+void JobSystem::reset_stats() {
+    stats.tasks_submitted = 0;
+    stats.tasks_completed = 0;
+    stats.tasks_stolen = 0;
+}
+
+void JobSystem::worker_thread(size_t thread_id) {
+    std::mt19937 rng(thread_id);  // For work stealing randomization
+    
+    while (running.load()) {
+        Task task;
+        bool found_task = false;
+        
+        // Try local queue first
+        {
+            std::unique_lock<std::mutex> lock(work_queues[thread_id]->mutex, std::try_to_lock);
+            if (lock.owns_lock() && !work_queues[thread_id]->tasks.empty()) {
+                task = work_queues[thread_id]->tasks.front();
+                work_queues[thread_id]->tasks.pop_front();
+                found_task = true;
+            }
+        }
+        
+        // Try global queue
+        if (!found_task) {
+            std::unique_lock<std::mutex> lock(global_mutex, std::try_to_lock);
+            if (lock.owns_lock() && !global_queue.empty()) {
+                task = global_queue.front();
+                global_queue.pop();
+                found_task = true;
+            }
+        }
+        
+        // Try work stealing
+        if (!found_task) {
+            found_task = try_steal_task(thread_id, task);
+            if (found_task) {
+                stats.tasks_stolen++;
+            }
+        }
+        
+        // Execute task if found
+        if (found_task && task.fn) {
+            task.fn(task.range, task.context);
+            stats.tasks_completed++;
+            
+            size_t prev = active_tasks.fetch_sub(1);
+            if (prev == 1) {
+                // Last task completed
+                cv_done.notify_all();
+            }
+        } else {
+            // No work available, wait
+            std::unique_lock<std::mutex> lock(cv_mutex);
+            cv_work.wait_for(lock, std::chrono::milliseconds(1),
+                           [this] { return !running.load() || active_tasks.load() > 0; });
+        }
+    }
+}
+
+bool JobSystem::try_steal_task(size_t thread_id, Task& task) {
+    if (work_queues.size() <= 1) return false;
+    
+    // Try to steal from a random victim
+    std::uniform_int_distribution<size_t> dist(0, work_queues.size() - 1);
+    
+    for (size_t attempts = 0; attempts < work_queues.size(); ++attempts) {
+        size_t victim_id = dist(rng);
+        if (victim_id == thread_id) continue;
+        
+        std::unique_lock<std::mutex> lock(work_queues[victim_id]->mutex, std::try_to_lock);
+        if (lock.owns_lock() && !work_queues[victim_id]->tasks.empty()) {
+            // Steal from the back (opposite end from victim's consumption)
+            task = work_queues[victim_id]->tasks.back();
+            work_queues[victim_id]->tasks.pop_back();
+            return true;
+        }
+    }
+    
+    return false;
+}

@@ -1,0 +1,60 @@
+#pragma once
+
+#include <chrono>
+#include <string>
+#include <iostream>
+
+namespace engine::profiling {
+
+// RAII timer for profiling code blocks
+class ScopedTimer {
+public:
+    explicit ScopedTimer(const std::string& name, bool enabled = true);
+    ~ScopedTimer();
+    
+    // Get elapsed time without stopping
+    double elapsed_ms() const;
+    
+    // Stop timer manually
+    void stop();
+    
+private:
+    std::string timer_name;
+    std::chrono::high_resolution_clock::time_point start_time;
+    bool is_enabled;
+    bool is_stopped;
+};
+
+// Allocation counter for detecting allocations in hot paths
+class AllocationGuard {
+public:
+    AllocationGuard();
+    ~AllocationGuard();
+    
+    // Check if any allocations occurred
+    bool has_allocations() const { return allocation_count > 0; }
+    size_t get_count() const { return allocation_count; }
+    
+    // Global allocation tracking
+    static void increment_allocation();
+    static void decrement_allocation();
+    
+private:
+    size_t initial_count;
+    size_t allocation_count;
+    static thread_local size_t global_allocation_count;
+};
+
+// CSV metrics output
+class MetricsCSV {
+public:
+    static void write_header();
+    static void write_row(int frame, 
+                          size_t entities,
+                          double ms_integrate,
+                          double ms_total,
+                          bool simd_used,
+                          int stolen_tasks);
+};
+
+} // namespace engine::profiling

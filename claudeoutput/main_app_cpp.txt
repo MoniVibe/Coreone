@@ -1,0 +1,141 @@
+#include "engine/sim/sim_loop.hpp"
+#include "engine/profiling/metrics.hpp"
+#include <iostream>
+#include <cstring>
+#include <cstdlib>
+
+// Command line argument parsing
+struct AppConfig {
+    int spawn_count = 1000;
+    int frames = 100;
+    float fixed_dt = 0.016f;
+    bool profile = false;
+    bool use_scalar = false;
+    uint64_t seed = 42;
+    int threads = 4;
+    bool run_tests = false;
+};
+
+AppConfig parse_args(int argc, char* argv[]) {
+    AppConfig config;
+    
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--spawn") == 0 && i + 1 < argc) {
+            config.spawn_count = std::atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
+            config.frames = std::atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--fixed-dt") == 0 && i + 1 < argc) {
+            config.fixed_dt = std::atof(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--profile") == 0) {
+            config.profile = true;
+        }
+        else if (strcmp(argv[i], "--scalar") == 0) {
+            config.use_scalar = true;
+        }
+        else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            config.seed = std::atoll(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            config.threads = std::atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--test") == 0) {
+            config.run_tests = true;
+        }
+        else if (strcmp(argv[i], "--help") == 0) {
+            std::cout << "Usage: " << argv[0] << " [options]\n"
+                      << "Options:\n"
+                      << "  --spawn N       Number of entities to spawn (default: 1000)\n"
+                      << "  --frames F      Number of frames to simulate (default: 100)\n"
+                      << "  --fixed-dt S    Fixed timestep in seconds (default: 0.016)\n"
+                      << "  --profile       Enable profiling output (CSV format)\n"
+                      << "  --scalar        Use scalar integration instead of SIMD\n"
+                      << "  --seed S        Random seed (default: 42)\n"
+                      << "  --threads N     Number of worker threads (default: 4)\n"
+                      << "  --test          Run basic tests\n"
+                      << "  --help          Show this help message\n";
+            std::exit(0);
+        }
+    }
+    
+    return config;
+}
+
+// Basic test to verify determinism
+void run_basic_test() {
+    std::cout << "Running basic determinism test...\n";
+    
+    engine::sim::SimLoop sim1;
+    engine::sim::SimLoop sim2;
+    
+    // Initialize with same seed and parameters
+    sim1.init(42, 100);
+    sim2.init(42, 100);
+    
+    // Run 100 frames
+    for (int i = 0; i < 100; i++) {
+        sim1.tick(0.016f);
+        sim2.tick(0.016f);
+    }
+    
+    // Compare hashes
+    uint64_t hash1 = sim1.hash_positions();
+    uint64_t hash2 = sim2.hash_positions();
+    
+    if (hash1 == hash2) {
+        std::cout << "✓ Determinism test passed. Hash: " << std::hex << hash1 << std::dec << "\n";
+    } else {
+        std::cerr << "✗ Determinism test FAILED! Hash1: " << std::hex << hash1 
+                  << " Hash2: " << hash2 << std::dec << "\n";
+        std::exit(1);
+    }
+}
+
+int main(int argc, char* argv[]) {
+    AppConfig config = parse_args(argc, argv);
+    
+    if (config.run_tests) {
+        run_basic_test();
+        std::cout << "All tests passed!\n";
+        return 0;
+    }
+    
+    // Create simulation
+    engine::sim::SimLoop sim;
+    
+    // Configure simulation
+    engine::sim::SimConfig sim_config;
+    sim_config.seed = config.seed;
+    sim_config.spawn_count = config.spawn_count;
+    sim_config.fixed_dt = config.fixed_dt;
+    sim_config.use_simd = !config.use_scalar;
+    sim_config.enable_profiling = config.profile;
+    sim_config.job_threads = config.threads;
+    
+    // Initialize
+    std::cout << "Initializing simulation with " << config.spawn_count << " entities...\n";
+    sim.init(sim_config);
+    
+    // Print CSV header if profiling
+    if (config.profile) {
+        engine::profiling::MetricsCSV::write_header();
+    }
+    
+    // Run simulation
+    std::cout << "Running " << config.frames << " frames...\n";
+    sim.run(config.frames, config.fixed_dt, config.profile);
+    
+    // Print final hash for determinism verification
+    uint64_t final_hash = sim.hash_positions();
+    std::cout << "Simulation complete. Final hash: " << std::hex << final_hash << std::dec << "\n";
+    
+    // Print summary if not profiling
+    if (!config.profile) {
+        std::cout << "Average frame time: " << sim.get_last_total_ms() << " ms\n";
+        std::cout << "Average integrate time: " << sim.get_last_integrate_ms() << " ms\n";
+    }
+    
+    return 0;
+}

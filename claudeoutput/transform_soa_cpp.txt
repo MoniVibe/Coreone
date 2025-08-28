@@ -1,0 +1,279 @@
+#include "transform_soa.hpp"
+#include <algorithm>
+#include <new>
+
+namespace engine::components {
+
+TransformSoA::TransformSoA(std::pmr::monotonic_buffer_resource* resource)
+    : memory(resource), allocator(resource) {
+}
+
+TransformSoA::~TransformSoA() {
+    deallocate();
+}
+
+TransformSoA::TransformSoA(TransformSoA&& other) noexcept {
+    moveFrom(std::move(other));
+}
+
+TransformSoA& TransformSoA::operator=(TransformSoA&& other) noexcept {
+    if (this != &other) {
+        deallocate();
+        moveFrom(std::move(other));
+    }
+    return *this;
+}
+
+void TransformSoA::reserve(size_t n) {
+    if (n <= capacity) return;
+    
+    // Allocate new aligned arrays
+    size_t bytes_per_array = n * sizeof(float);
+    
+    // Allocate all arrays
+    float* new_posX = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_posY = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_posZ = static_cast<float*>(allocateAligned(bytes_per_array));
+    
+    float* new_quatX = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_quatY = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_quatZ = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_quatW = static_cast<float*>(allocateAligned(bytes_per_array));
+    
+    float* new_scaleX = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_scaleY = static_cast<float*>(allocateAligned(bytes_per_array));
+    float* new_scaleZ = static_cast<float*>(allocateAligned(bytes_per_array));
+    
+    // Copy existing data
+    if (count > 0) {
+        std::memcpy(new_posX, posX, count * sizeof(float));
+        std::memcpy(new_posY, posY, count * sizeof(float));
+        std::memcpy(new_posZ, posZ, count * sizeof(float));
+        
+        std::memcpy(new_quatX, quatX, count * sizeof(float));
+        std::memcpy(new_quatY, quatY, count * sizeof(float));
+        std::memcpy(new_quatZ, quatZ, count * sizeof(float));
+        std::memcpy(new_quatW, quatW, count * sizeof(float));
+        
+        std::memcpy(new_scaleX, scaleX, count * sizeof(float));
+        std::memcpy(new_scaleY, scaleY, count * sizeof(float));
+        std::memcpy(new_scaleZ, scaleZ, count * sizeof(float));
+    }
+    
+    // Update pointers
+    posX = new_posX;
+    posY = new_posY;
+    posZ = new_posZ;
+    
+    quatX = new_quatX;
+    quatY = new_quatY;
+    quatZ = new_quatZ;
+    quatW = new_quatW;
+    
+    scaleX = new_scaleX;
+    scaleY = new_scaleY;
+    scaleZ = new_scaleZ;
+    
+    capacity = n;
+}
+
+void TransformSoA::getPosition(size_t i, float& x, float& y, float& z) const {
+    assert(valid(i));
+    x = posX[i];
+    y = posY[i];
+    z = posZ[i];
+}
+
+void TransformSoA::setPosition(size_t i, float x, float y, float z) {
+    assert(valid(i));
+    posX[i] = x;
+    posY[i] = y;
+    posZ[i] = z;
+}
+
+void TransformSoA::getQuaternion(size_t i, float& x, float& y, float& z, float& w) const {
+    assert(valid(i));
+    x = quatX[i];
+    y = quatY[i];
+    z = quatZ[i];
+    w = quatW[i];
+}
+
+void TransformSoA::setQuaternion(size_t i, float x, float y, float z, float w) {
+    assert(valid(i));
+    quatX[i] = x;
+    quatY[i] = y;
+    quatZ[i] = z;
+    quatW[i] = w;
+}
+
+void TransformSoA::getScale(size_t i, float& x, float& y, float& z) const {
+    assert(valid(i));
+    x = scaleX[i];
+    y = scaleY[i];
+    z = scaleZ[i];
+}
+
+void TransformSoA::setScale(size_t i, float x, float y, float z) {
+    assert(valid(i));
+    scaleX[i] = x;
+    scaleY[i] = y;
+    scaleZ[i] = z;
+}
+
+void TransformSoA::loadPositionAligned4(size_t i, float* dst) const {
+    assert(valid(i + 3));
+    assert(reinterpret_cast<uintptr_t>(dst) % ALIGNMENT == 0);
+    
+    // Load 4 positions at once
+    std::memcpy(dst, &posX[i], 4 * sizeof(float));
+    std::memcpy(dst + 4, &posY[i], 4 * sizeof(float));
+    std::memcpy(dst + 8, &posZ[i], 4 * sizeof(float));
+}
+
+void TransformSoA::storePositionAligned4(size_t i, const float* src) {
+    assert(valid(i + 3));
+    assert(reinterpret_cast<uintptr_t>(src) % ALIGNMENT == 0);
+    
+    // Store 4 positions at once
+    std::memcpy(&posX[i], src, 4 * sizeof(float));
+    std::memcpy(&posY[i], src + 4, 4 * sizeof(float));
+    std::memcpy(&posZ[i], src + 8, 4 * sizeof(float));
+}
+
+void TransformSoA::loadQuaternionAligned4(size_t i, float* dst) const {
+    assert(valid(i + 3));
+    assert(reinterpret_cast<uintptr_t>(dst) % ALIGNMENT == 0);
+    
+    std::memcpy(dst, &quatX[i], 4 * sizeof(float));
+    std::memcpy(dst + 4, &quatY[i], 4 * sizeof(float));
+    std::memcpy(dst + 8, &quatZ[i], 4 * sizeof(float));
+    std::memcpy(dst + 12, &quatW[i], 4 * sizeof(float));
+}
+
+void TransformSoA::storeQuaternionAligned4(size_t i, const float* src) {
+    assert(valid(i + 3));
+    assert(reinterpret_cast<uintptr_t>(src) % ALIGNMENT == 0);
+    
+    std::memcpy(&quatX[i], src, 4 * sizeof(float));
+    std::memcpy(&quatY[i], src + 4, 4 * sizeof(float));
+    std::memcpy(&quatZ[i], src + 8, 4 * sizeof(float));
+    std::memcpy(&quatW[i], src + 12, 4 * sizeof(float));
+}
+
+size_t TransformSoA::add(float px, float py, float pz,
+                         float qx, float qy, float qz, float qw,
+                         float sx, float sy, float sz) {
+    if (count >= capacity) {
+        // Amortized growth
+        size_t new_capacity = std::max(size_t(16), capacity * 2);
+        reserve(new_capacity);
+    }
+    
+    size_t i = count++;
+    
+    posX[i] = px;
+    posY[i] = py;
+    posZ[i] = pz;
+    
+    quatX[i] = qx;
+    quatY[i] = qy;
+    quatZ[i] = qz;
+    quatW[i] = qw;
+    
+    scaleX[i] = sx;
+    scaleY[i] = sy;
+    scaleZ[i] = sz;
+    
+    return i;
+}
+
+void TransformSoA::remove(size_t i) {
+    assert(valid(i));
+    
+    if (i != count - 1) {
+        // Swap with last element
+        size_t last = count - 1;
+        
+        posX[i] = posX[last];
+        posY[i] = posY[last];
+        posZ[i] = posZ[last];
+        
+        quatX[i] = quatX[last];
+        quatY[i] = quatY[last];
+        quatZ[i] = quatZ[last];
+        quatW[i] = quatW[last];
+        
+        scaleX[i] = scaleX[last];
+        scaleY[i] = scaleY[last];
+        scaleZ[i] = scaleZ[last];
+    }
+    
+    count--;
+}
+
+void TransformSoA::verifyAlignment() const {
+    assert(reinterpret_cast<uintptr_t>(posX) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(posY) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(posZ) % ALIGNMENT == 0);
+    
+    assert(reinterpret_cast<uintptr_t>(quatX) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(quatY) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(quatZ) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(quatW) % ALIGNMENT == 0);
+    
+    assert(reinterpret_cast<uintptr_t>(scaleX) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(scaleY) % ALIGNMENT == 0);
+    assert(reinterpret_cast<uintptr_t>(scaleZ) % ALIGNMENT == 0);
+}
+
+void* TransformSoA::allocateAligned(size_t size) {
+    // Align size to ALIGNMENT boundary
+    size_t aligned_size = (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+    // Allocate with alignment
+    void* ptr = allocator.allocate_bytes(aligned_size, ALIGNMENT);
+    
+    // Verify alignment
+    assert(reinterpret_cast<uintptr_t>(ptr) % ALIGNMENT == 0);
+    
+    return ptr;
+}
+
+void TransformSoA::deallocate() {
+    // PMR allocator handles deallocation through resource
+    // Just reset pointers
+    posX = posY = posZ = nullptr;
+    quatX = quatY = quatZ = quatW = nullptr;
+    scaleX = scaleY = scaleZ = nullptr;
+    count = capacity = 0;
+}
+
+void TransformSoA::moveFrom(TransformSoA&& other) noexcept {
+    posX = other.posX;
+    posY = other.posY;
+    posZ = other.posZ;
+    
+    quatX = other.quatX;
+    quatY = other.quatY;
+    quatZ = other.quatZ;
+    quatW = other.quatW;
+    
+    scaleX = other.scaleX;
+    scaleY = other.scaleY;
+    scaleZ = other.scaleZ;
+    
+    count = other.count;
+    capacity = other.capacity;
+    memory = other.memory;
+    allocator = other.allocator;
+    
+    // Clear other
+    other.posX = other.posY = other.posZ = nullptr;
+    other.quatX = other.quatY = other.quatZ = other.quatW = nullptr;
+    other.scaleX = other.scaleY = other.scaleZ = nullptr;
+    other.count = other.capacity = 0;
+    other.memory = nullptr;
+}
+
+} // namespace engine::components

@@ -1,0 +1,203 @@
+// bounding_sphere_soa.hpp
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory_resource>
+#include <cassert>
+#include <cstring>
+
+namespace engine::components {
+
+// Structure-of-Arrays bounding sphere component for efficient SIMD processing
+struct BoundingSphereSoA {
+    // Radius array
+    float* radius = nullptr;
+    
+    // Current number of active spheres and total capacity
+    size_t count = 0;
+    size_t capacity = 0;
+    
+    // Memory resource for allocation
+    std::pmr::monotonic_buffer_resource* memory = nullptr;
+    std::pmr::polymorphic_allocator<std::byte> allocator;
+    
+    // Alignment requirement for SIMD operations
+    static constexpr size_t ALIGNMENT = 32;
+    
+    BoundingSphereSoA() : allocator(std::pmr::get_default_resource()) {}
+    explicit BoundingSphereSoA(std::pmr::monotonic_buffer_resource* resource);
+    ~BoundingSphereSoA();
+    
+    // Disable copy, allow move
+    BoundingSphereSoA(const BoundingSphereSoA&) = delete;
+    BoundingSphereSoA& operator=(const BoundingSphereSoA&) = delete;
+    BoundingSphereSoA(BoundingSphereSoA&& other) noexcept;
+    BoundingSphereSoA& operator=(BoundingSphereSoA&& other) noexcept;
+    
+    // Reserve capacity for N spheres
+    void reserve(size_t n);
+    
+    // Get current size
+    size_t size() const { return count; }
+    
+    // Check if index is valid
+    bool valid(size_t i) const { return i < count; }
+    
+    // Get/set radius at index
+    float getRadius(size_t i) const { assert(valid(i)); return radius[i]; }
+    void setRadius(size_t i, float r) { assert(valid(i)); radius[i] = r; }
+    
+    // SIMD-friendly aligned load/store (4-wide)
+    void loadAligned4(size_t i, float* dst) const;
+    void storeAligned4(size_t i, const float* src);
+    
+    // Add a new bounding sphere
+    size_t add(float r);
+    
+    // Remove sphere at index (swap with last)
+    void remove(size_t i);
+    
+    // Clear all spheres (keep capacity)
+    void clear() { count = 0; }
+    
+    // Verify alignment for debugging
+    void verifyAlignment() const;
+    
+private:
+    void* allocateAligned(size_t size);
+    void deallocate();
+    void moveFrom(BoundingSphereSoA&& other) noexcept;
+};
+
+} // namespace engine::components
+
+// -----------------------------------------------------------
+// bounding_sphere_soa.cpp
+#include "bounding_sphere_soa.hpp"
+#include <algorithm>
+#include <new>
+
+namespace engine::components {
+
+BoundingSphereSoA::BoundingSphereSoA(std::pmr::monotonic_buffer_resource* resource)
+    : memory(resource), allocator(resource) {
+}
+
+BoundingSphereSoA::~BoundingSphereSoA() {
+    deallocate();
+}
+
+BoundingSphereSoA::BoundingSphereSoA(BoundingSphereSoA&& other) noexcept
+    : allocator(std::pmr::get_default_resource()) {
+    moveFrom(std::move(other));
+}
+
+BoundingSphereSoA& BoundingSphereSoA::operator=(BoundingSphereSoA&& other) noexcept {
+    if (this != &other) {
+        deallocate();
+        moveFrom(std::move(other));
+    }
+    return *this;
+}
+
+void* BoundingSphereSoA::allocateAligned(size_t size) {
+    // Allocate with extra space for alignment
+    size_t alignedSize = size + ALIGNMENT - 1;
+    void* raw = allocator.allocate(alignedSize);
+    
+    // Align the pointer
+    size_t addr = reinterpret_cast<size_t>(raw);
+    size_t aligned = (addr + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+    assert((aligned & (ALIGNMENT - 1)) == 0);
+    return reinterpret_cast<void*>(aligned);
+}
+
+void BoundingSphereSoA::reserve(size_t n) {
+    if (n <= capacity) return;
+    
+    // Round up to multiple of 16 for better SIMD
+    n = (n + 15) & ~15;
+    
+    // Allocate new array
+    size_t floatBytes = n * sizeof(float);
+    float* newRadius = static_cast<float*>(allocateAligned(floatBytes));
+    
+    // Copy existing data
+    if (count > 0) {
+        std::memcpy(newRadius, radius, count * sizeof(float));
+    }
+    
+    // Initialize new elements to default radius
+    for (size_t i = count; i < n; ++i) {
+        newRadius[i] = 1.0f;
+    }
+    
+    // Update pointer
+    radius = newRadius;
+    capacity = n;
+}
+
+void BoundingSphereSoA::deallocate() {
+    // PMR handles deallocation through resource
+    radius = nullptr;
+    capacity = count = 0;
+}
+
+void BoundingSphereSoA::moveFrom(BoundingSphereSoA&& other) noexcept {
+    radius = other.radius;
+    count = other.count;
+    capacity = other.capacity;
+    memory = other.memory;
+    allocator = std::move(other.allocator);
+    
+    other.radius = nullptr;
+    other.count = other.capacity = 0;
+}
+
+void BoundingSphereSoA::loadAligned4(size_t i, float* dst) const {
+    assert(valid(i + 3));  // Ensure 4 elements available
+    assert(((uintptr_t)dst & 31) == 0);  // Check dst alignment
+    
+    // Load 4 consecutive radii
+    std::memcpy(dst, radius + i, 4 * sizeof(float));
+}
+
+void BoundingSphereSoA::storeAligned4(size_t i, const float* src) {
+    assert(valid(i + 3));  // Ensure 4 elements available
+    assert(((uintptr_t)src & 31) == 0);  // Check src alignment
+    
+    // Store 4 consecutive radii
+    std::memcpy(radius + i, src, 4 * sizeof(float));
+}
+
+size_t BoundingSphereSoA::add(float r) {
+    if (count >= capacity) {
+        reserve(capacity == 0 ? 64 : capacity * 2);
+    }
+    
+    size_t idx = count++;
+    radius[idx] = r;
+    return idx;
+}
+
+void BoundingSphereSoA::remove(size_t i) {
+    assert(valid(i));
+    if (i == count - 1) {
+        // Last element, just decrement count
+        --count;
+        return;
+    }
+    
+    // Swap with last element
+    radius[i] = radius[count - 1];
+    --count;
+}
+
+void BoundingSphereSoA::verifyAlignment() const {
+    uintptr_t addr = reinterpret_cast<uintptr_t>(radius);
+    assert((addr & (ALIGNMENT - 1)) == 0);
+}
+
+} // namespace engine::components

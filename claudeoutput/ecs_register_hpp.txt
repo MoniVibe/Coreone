@@ -1,8 +1,8 @@
-﻿#pragma once
+#pragma once
 
 #include <flecs.h>
 
-namespace eng { namespace ecs {
+namespace engine::ecs {
 
 // Component tags for entity classification
 struct Movable {};
@@ -11,4 +11,4 @@ struct Debug {};
 // Register all components and tags with the ECS world
 void register_components(flecs::world& world);
 
-} }
+} // namespace engine::ecs

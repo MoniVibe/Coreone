@@ -1,0 +1,126 @@
+// chunk_iter.hpp
+#pragma once
+
+#include <cstddef>
+#include <functional>
+#include <vector>
+
+namespace engine::ecs {
+
+// Fixed chunk size for cache-friendly iteration
+constexpr size_t CHUNK_SIZE = 4096;
+
+// Range representing a contiguous block of indices
+struct ChunkRange {
+    size_t begin;
+    size_t end;
+    
+    size_t size() const { return end - begin; }
+    bool empty() const { return begin >= end; }
+};
+
+// Iterator for processing data in chunks
+class ChunkIterator {
+public:
+    using ChunkCallback = std::function<void(const ChunkRange&)>;
+    
+    // Iterate over count items in chunks
+    static void for_each_chunk(size_t count, size_t chunk_size, ChunkCallback callback);
+    
+    // Default chunk size
+    static void for_each_chunk(size_t count, ChunkCallback callback) {
+        for_each_chunk(count, CHUNK_SIZE, callback);
+    }
+    
+    // Split range into N sub-ranges for parallel processing
+    static std::vector<ChunkRange> split_range(const ChunkRange& range, size_t workers);
+    
+    // Split count into N balanced ranges
+    static std::vector<ChunkRange> split_count(size_t count, size_t workers);
+    
+    // Get optimal chunk size for given data size
+    static size_t optimal_chunk_size(size_t total_size);
+    
+    // Align range to chunk boundaries (for SIMD)
+    static ChunkRange align_range(const ChunkRange& range, size_t alignment);
+};
+
+} // namespace engine::ecs
+
+// -----------------------------------------------------------
+// chunk_iter.cpp
+#include "chunk_iter.hpp"
+#include <algorithm>
+#include <cassert>
+
+namespace engine::ecs {
+
+void ChunkIterator::for_each_chunk(size_t count, size_t chunk_size, ChunkCallback callback) {
+    if (count == 0 || chunk_size == 0) return;
+    
+    size_t num_chunks = (count + chunk_size - 1) / chunk_size;
+    
+    for (size_t chunk = 0; chunk < num_chunks; ++chunk) {
+        size_t begin = chunk * chunk_size;
+        size_t end = std::min(begin + chunk_size, count);
+        
+        ChunkRange range{begin, end};
+        callback(range);
+    }
+}
+
+std::vector<ChunkRange> ChunkIterator::split_range(const ChunkRange& range, size_t workers) {
+    if (workers == 0) workers = 1;
+    
+    size_t total = range.size();
+    if (total == 0) return {};
+    
+    std::vector<ChunkRange> ranges;
+    ranges.reserve(workers);
+    
+    // Calculate base size and remainder
+    size_t base_size = total / workers;
+    size_t remainder = total % workers;
+    
+    size_t current = range.begin;
+    
+    for (size_t i = 0; i < workers; ++i) {
+        size_t chunk_size = base_size + (i < remainder ? 1 : 0);
+        if (chunk_size > 0) {
+            ranges.push_back({current, current + chunk_size});
+            current += chunk_size;
+        }
+    }
+    
+    assert(current == range.end);
+    return ranges;
+}
+
+std::vector<ChunkRange> ChunkIterator::split_count(size_t count, size_t workers) {
+    return split_range({0, count}, workers);
+}
+
+size_t ChunkIterator::optimal_chunk_size(size_t total_size) {
+    // Balance between cache efficiency and parallelism overhead
+    if (total_size <= 1024) {
+        return total_size;  // Small data, process in one chunk
+    } else if (total_size <= 16384) {
+        return 1024;  // Medium data, smaller chunks
+    } else {
+        return CHUNK_SIZE;  // Large data, default chunk size
+    }
+}
+
+ChunkRange ChunkIterator::align_range(const ChunkRange& range, size_t alignment) {
+    if (alignment <= 1) return range;
+    
+    // Round begin down to alignment boundary
+    size_t aligned_begin = range.begin & ~(alignment - 1);
+    
+    // Round end up to alignment boundary
+    size_t aligned_end = (range.end + alignment - 1) & ~(alignment - 1);
+    
+    return {aligned_begin, aligned_end};
+}
+
+} // namespace engine::ecs

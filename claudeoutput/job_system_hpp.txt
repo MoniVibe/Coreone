@@ -1,0 +1,48 @@
+#pragma once
+
+#include <functional>
+#include <vector>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <future>
+
+namespace engine::job {
+
+// Job handle for tracking completion
+using JobHandle = std::shared_future<void>;
+
+// Simple thread pool job system
+class JobSystem {
+public:
+    explicit JobSystem(size_t thread_count = std::thread::hardware_concurrency());
+    ~JobSystem();
+    
+    // Submit job for execution
+    JobHandle submit(std::function<void()> job);
+    
+    // Wait for specific job
+    void wait(const JobHandle& handle);
+    
+    // Wait for all jobs
+    void wait_all(const std::vector<JobHandle>& handles);
+    
+    // Get number of worker threads
+    size_t get_thread_count() const { return workers.size(); }
+    
+    // Stop accepting new jobs and wait for completion
+    void shutdown();
+    
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::packaged_task<void()>> jobs;
+    std::mutex queue_mutex;
+    std::condition_variable cv;
+    std::atomic<bool> stop{false};
+    
+    void worker_thread();
+};
+
+} // namespace engine::job

@@ -1,0 +1,79 @@
+#pragma once
+
+#include <flecs.h>
+#include <memory>
+#include <cstdint>
+#include "../components/transform_soa.hpp"
+#include "../ecs/index_map.hpp"
+#include "../ecs/factory.hpp"
+#include "../systems/integrate_motion.hpp"
+#include "../job/job_system.hpp"
+
+namespace engine::sim {
+
+// Simulation configuration
+struct SimConfig {
+    uint64_t seed = 42;
+    int spawn_count = 1000;
+    float fixed_dt = 0.016f; // 60 FPS default
+    bool use_simd = true;
+    bool enable_profiling = false;
+    int job_threads = 4;
+};
+
+// Simulation loop manager
+class SimLoop {
+public:
+    SimLoop();
+    ~SimLoop();
+    
+    // Initialize simulation with config
+    void init(const SimConfig& config);
+    void init(uint64_t seed, int spawn_n);
+    
+    // Run single tick
+    void tick(float dt);
+    
+    // Run multiple frames
+    void run(int frames, float dt, bool profile);
+    
+    // Get deterministic hash of positions
+    uint64_t hash_positions() const;
+    
+    // Get metrics
+    size_t get_entity_count() const;
+    double get_last_integrate_ms() const;
+    double get_last_total_ms() const;
+    
+private:
+    // ECS world
+    flecs::world world;
+    
+    // Memory resources
+    std::unique_ptr<std::pmr::monotonic_buffer_resource> memory_resource;
+    std::unique_ptr<engine::components::TransformSoA> transform_soa;
+    
+    // ECS components
+    std::unique_ptr<engine::ecs::IndexMap> index_map;
+    std::unique_ptr<engine::ecs::EntityFactory> factory;
+    
+    // Systems
+    std::unique_ptr<engine::systems::IntegrateMotionSystem> integrate_system;
+    
+    // Job system for parallelization
+    std::unique_ptr<engine::job::JobSystem> job_system;
+    
+    // Configuration
+    SimConfig config;
+    
+    // Metrics
+    double last_total_ms = 0.0;
+    uint64_t frame_count = 0;
+    
+    // Pipeline stages (placeholders for now)
+    void run_orders();
+    void run_lod();
+    void run_culling();
+};
+
+} // namespace engine::sim

@@ -1,0 +1,73 @@
+#include "job_system.hpp"
+
+namespace engine::job {
+
+JobSystem::JobSystem(size_t thread_count) {
+    for (size_t i = 0; i < thread_count; i++) {
+        workers.emplace_back(&JobSystem::worker_thread, this);
+    }
+}
+
+JobSystem::~JobSystem() {
+    shutdown();
+}
+
+JobHandle JobSystem::submit(std::function<void()> job) {
+    std::packaged_task<void()> task(std::move(job));
+    JobHandle handle = task.get_future().share();
+    
+    {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        jobs.push(std::move(task));
+    }
+    
+    cv.notify_one();
+    return handle;
+}
+
+void JobSystem::wait(const JobHandle& handle) {
+    handle.wait();
+}
+
+void JobSystem::wait_all(const std::vector<JobHandle>& handles) {
+    for (const auto& handle : handles) {
+        handle.wait();
+    }
+}
+
+void JobSystem::shutdown() {
+    stop = true;
+    cv.notify_all();
+    
+    for (auto& worker : workers) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+}
+
+void JobSystem::worker_thread() {
+    while (!stop) {
+        std::packaged_task<void()> task;
+        
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            cv.wait(lock, [this] { return stop || !jobs.empty(); });
+            
+            if (stop && jobs.empty()) {
+                return;
+            }
+            
+            if (!jobs.empty()) {
+                task = std::move(jobs.front());
+                jobs.pop();
+            }
+        }
+        
+        if (task.valid()) {
+            task();
+        }
+    }
+}
+
+} // namespace engine::job

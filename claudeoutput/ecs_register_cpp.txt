@@ -1,6 +1,6 @@
-﻿#include "ecs_register.hpp"
+#include "ecs_register.hpp"
 
-namespace eng { namespace ecs {
+namespace engine::ecs {
 
 void register_components(flecs::world& world) {
     // Register component tags
@@ -11,4 +11,4 @@ void register_components(flecs::world& world) {
     // The transform data itself lives in SoA, not as ECS components
 }
 
-} }
+} // namespace engine::ecs

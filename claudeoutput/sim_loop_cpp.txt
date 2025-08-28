@@ -1,0 +1,166 @@
+#include "sim_loop.hpp"
+#include "../ecs/ecs_register.hpp"
+#include "../profiling/metrics.hpp"
+#include <random>
+#include <chrono>
+#include <iostream>
+#include <iomanip>
+
+namespace engine::sim {
+
+SimLoop::SimLoop() : world() {
+    // Initialize memory resource with 64MB buffer
+    constexpr size_t BUFFER_SIZE = 64 * 1024 * 1024;
+    auto buffer = std::make_unique<std::byte[]>(BUFFER_SIZE);
+    memory_resource = std::make_unique<std::pmr::monotonic_buffer_resource>(
+        buffer.get(), BUFFER_SIZE, std::pmr::get_default_resource()
+    );
+    
+    // Initialize SoA with memory resource
+    transform_soa = std::make_unique<engine::components::TransformSoA>(memory_resource.get());
+    
+    // Initialize ECS components
+    index_map = std::make_unique<engine::ecs::IndexMap>();
+    factory = std::make_unique<engine::ecs::EntityFactory>(world, *transform_soa, *index_map);
+}
+
+SimLoop::~SimLoop() = default;
+
+void SimLoop::init(const SimConfig& cfg) {
+    config = cfg;
+    
+    // Register ECS components
+    engine::ecs::register_components(world);
+    
+    // Initialize job system if threading enabled
+    if (config.job_threads > 1) {
+        job_system = std::make_unique<engine::job::JobSystem>(config.job_threads);
+    }
+    
+    // Initialize systems
+    integrate_system = std::make_unique<engine::systems::IntegrateMotionSystem>(
+        world, *transform_soa, *index_map, job_system.get()
+    );
+    
+    // Reserve capacity
+    factory->reserve(config.spawn_count);
+    
+    // Spawn entities with deterministic random positions/velocities
+    std::mt19937 rng(config.seed);
+    std::uniform_real_distribution<float> pos_dist(-100.0f, 100.0f);
+    std::uniform_real_distribution<float> vel_dist(-10.0f, 10.0f);
+    std::uniform_real_distribution<float> radius_dist(0.5f, 2.0f);
+    
+    for (int i = 0; i < config.spawn_count; i++) {
+        engine::ecs::vec3 pos(pos_dist(rng), pos_dist(rng), pos_dist(rng));
+        engine::ecs::vec3 vel(vel_dist(rng), vel_dist(rng), vel_dist(rng));
+        float radius = radius_dist(rng);
+        
+        factory->spawn_movable(pos, vel, radius);
+    }
+    
+    frame_count = 0;
+}
+
+void SimLoop::init(uint64_t seed, int spawn_n) {
+    SimConfig cfg;
+    cfg.seed = seed;
+    cfg.spawn_count = spawn_n;
+    init(cfg);
+}
+
+void SimLoop::tick(float dt) {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+    // Pipeline: Orders → IntegrateMotion → LOD → Culling
+    run_orders();
+    
+    // Main motion integration
+    auto mode = config.use_simd ? 
+        engine::systems::IntegrationMode::SIMD : 
+        engine::systems::IntegrationMode::SCALAR;
+    integrate_system->run(dt, mode);
+    
+    run_lod();
+    run_culling();
+    
+    // Progress world
+    world.progress(dt);
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    last_total_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+    
+    frame_count++;
+}
+
+void SimLoop::run(int frames, float dt, bool profile) {
+    config.enable_profiling = profile;
+    
+    for (int i = 0; i < frames; i++) {
+        tick(dt);
+        
+        if (profile) {
+            // Output CSV line: frame,entities,ms_integrate,ms_total,simd_used,stolen_tasks
+            std::cout << i << ","
+                      << get_entity_count() << ","
+                      << std::fixed << std::setprecision(3)
+                      << integrate_system->get_last_frame_ms() << ","
+                      << last_total_ms << ","
+                      << (config.use_simd && engine::systems::IntegrateMotionSystem::is_simd_available() ? 1 : 0) << ","
+                      << 0 // stolen_tasks placeholder
+                      << std::endl;
+        }
+    }
+}
+
+uint64_t SimLoop::hash_positions() const {
+    // FNV-1a hash of all positions
+    uint64_t hash = 14695981039346656037ULL;
+    const uint64_t prime = 1099511628211ULL;
+    
+    for (size_t i = 0; i < transform_soa->size(); i++) {
+        float x, y, z;
+        transform_soa->getPosition(i, x, y, z);
+        
+        // Hash each float's bits
+        uint32_t* px = reinterpret_cast<uint32_t*>(&x);
+        uint32_t* py = reinterpret_cast<uint32_t*>(&y);
+        uint32_t* pz = reinterpret_cast<uint32_t*>(&z);
+        
+        hash ^= *px;
+        hash *= prime;
+        hash ^= *py;
+        hash *= prime;
+        hash ^= *pz;
+        hash *= prime;
+    }
+    
+    return hash;
+}
+
+size_t SimLoop::get_entity_count() const {
+    return index_map->size();
+}
+
+double SimLoop::get_last_integrate_ms() const {
+    return integrate_system->get_last_frame_ms();
+}
+
+double SimLoop::get_last_total_ms() const {
+    return last_total_ms;
+}
+
+// Pipeline stage placeholders
+void SimLoop::run_orders() {
+    // No-op for now
+}
+
+void SimLoop::run_lod() {
+    // No-op for now
+}
+
+void SimLoop::run_culling() {
+    // No-op for now
+}
+
+} // namespace engine::sim

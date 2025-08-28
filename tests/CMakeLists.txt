@@ -1,4 +1,5 @@
 add_executable(unit_tests
+  unit/test_main.cpp
   unit/ecs_basic.cpp
   unit/simd_equivalence.cpp
 )

@@ -1,0 +1,86 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory_resource>
+#include <cassert>
+#include <cstring>
+
+namespace engine::components {
+
+// Structure-of-Arrays velocity component for efficient SIMD processing
+struct VelocitySoA {
+    // Velocity components
+    float* vx = nullptr;
+    float* vy = nullptr;
+    float* vz = nullptr;
+    
+    // Current number of active velocities and total capacity
+    size_t count = 0;
+    size_t capacity = 0;
+    
+    // Memory resource for allocation
+    std::pmr::monotonic_buffer_resource* memory = nullptr;
+    std::pmr::polymorphic_allocator<std::byte> allocator;
+    
+    // Alignment requirement for SIMD operations
+    static constexpr size_t ALIGNMENT = 32;
+    
+    VelocitySoA() : allocator(std::pmr::get_default_resource()) {}
+    explicit VelocitySoA(std::pmr::monotonic_buffer_resource* resource);
+    ~VelocitySoA();
+    
+    // Disable copy, allow move
+    VelocitySoA(const VelocitySoA&) = delete;
+    VelocitySoA& operator=(const VelocitySoA&) = delete;
+    VelocitySoA(VelocitySoA&& other) noexcept;
+    VelocitySoA& operator=(VelocitySoA&& other) noexcept;
+    
+    // Reserve capacity for N velocities
+    void reserve(size_t n);
+    
+    // Get current size
+    size_t size() const { return count; }
+    
+    // Check if index is valid
+    bool valid(size_t i) const { return i < count; }
+    
+    // Get velocity at index
+    void getVelocity(size_t i, float& x, float& y, float& z) const;
+    void setVelocity(size_t i, float x, float y, float z);
+    
+    // Direct access for hot paths
+    float getVx(size_t i) const { assert(valid(i)); return vx[i]; }
+    float getVy(size_t i) const { assert(valid(i)); return vy[i]; }
+    float getVz(size_t i) const { assert(valid(i)); return vz[i]; }
+    
+    void setVx(size_t i, float v) { assert(valid(i)); vx[i] = v; }
+    void setVy(size_t i, float v) { assert(valid(i)); vy[i] = v; }
+    void setVz(size_t i, float v) { assert(valid(i)); vz[i] = v; }
+    
+    // SIMD-friendly aligned load/store (4-wide)
+    void loadAligned4(size_t i, float* dst) const;
+    void storeAligned4(size_t i, const float* src);
+    
+    // Add a new velocity
+    size_t add(float x, float y, float z);
+    
+    // Remove velocity at index (swap with last)
+    void remove(size_t i);
+    
+    // Clear all velocities (keep capacity)
+    void clear() { count = 0; }
+    
+    // Zero all velocities
+    void zeroAll();
+    
+    // Verify alignment for debugging
+    void verifyAlignment() const;
+    
+private:
+    void* allocateAligned(size_t size);
+    void deallocate();
+    void moveFrom(VelocitySoA&& other) noexcept;
+};
+
+} // namespace engine::components

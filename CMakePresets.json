@@ -9,7 +9,22 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "ENABLE_TESTS": "ON",
         "ENABLE_RENDER": "OFF",
-        "ENABLE_AVX2": "ON"
+        "ENABLE_AVX2": "ON",
+        "ENABLE_SIMD": "ON",
+        "SCALAR_ONLY": "OFF"
+      }
+    },
+    {
+      "name": "win-msvc-scalar",
+      "generator": "Ninja",
+      "binaryDir": "build/win-msvc-scalar",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_RENDER": "OFF",
+        "ENABLE_AVX2": "OFF",
+        "ENABLE_SIMD": "OFF",
+        "SCALAR_ONLY": "ON"
       }
     },
     {
@@ -22,17 +37,38 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "ENABLE_TESTS": "ON",
         "ENABLE_RENDER": "OFF",
-        "ENABLE_AVX2": "ON"
+        "ENABLE_AVX2": "ON",
+        "ENABLE_SIMD": "ON",
+        "SCALAR_ONLY": "OFF"
+      }
+    },
+    {
+      "name": "linux-clang-scalar",
+      "generator": "Ninja",
+      "binaryDir": "build/linux-clang-scalar",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_RENDER": "OFF",
+        "ENABLE_AVX2": "OFF",
+        "ENABLE_SIMD": "OFF",
+        "SCALAR_ONLY": "ON"
       }
     }
   ],
   "buildPresets": [
     { "name": "win-msvc", "configurePreset": "win-msvc" },
-    { "name": "linux-clang", "configurePreset": "linux-clang" }
+    { "name": "win-msvc-scalar", "configurePreset": "win-msvc-scalar" },
+    { "name": "linux-clang", "configurePreset": "linux-clang" },
+    { "name": "linux-clang-scalar", "configurePreset": "linux-clang-scalar" }
   ],
   "testPresets": [
     { "name": "win-msvc", "configurePreset": "win-msvc" },
-    { "name": "linux-clang", "configurePreset": "linux-clang" }
+    { "name": "win-msvc-scalar", "configurePreset": "win-msvc-scalar" },
+    { "name": "linux-clang", "configurePreset": "linux-clang" },
+    { "name": "linux-clang-scalar", "configurePreset": "linux-clang-scalar" }
   ]
 }
 

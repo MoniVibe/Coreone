@@ -1,0 +1,84 @@
+#include "metrics.hpp"
+#include <iomanip>
+
+namespace engine::profiling {
+
+// ScopedTimer implementation
+ScopedTimer::ScopedTimer(const std::string& name, bool enabled)
+    : timer_name(name), is_enabled(enabled), is_stopped(false) {
+    if (is_enabled) {
+        start_time = std::chrono::high_resolution_clock::now();
+    }
+}
+
+ScopedTimer::~ScopedTimer() {
+    if (is_enabled && !is_stopped) {
+        stop();
+    }
+}
+
+double ScopedTimer::elapsed_ms() const {
+    if (!is_enabled) return 0.0;
+    
+    auto now = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration<double, std::milli>(now - start_time).count();
+}
+
+void ScopedTimer::stop() {
+    if (!is_enabled || is_stopped) return;
+    
+    double elapsed = elapsed_ms();
+    std::cerr << "[TIMER] " << timer_name << ": " 
+              << std::fixed << std::setprecision(3) 
+              << elapsed << " ms" << std::endl;
+    is_stopped = true;
+}
+
+// AllocationGuard implementation
+thread_local size_t AllocationGuard::global_allocation_count = 0;
+
+AllocationGuard::AllocationGuard() {
+    initial_count = global_allocation_count;
+    allocation_count = 0;
+}
+
+AllocationGuard::~AllocationGuard() {
+    allocation_count = global_allocation_count - initial_count;
+    if (allocation_count > 0) {
+        std::cerr << "[ALLOC] Detected " << allocation_count 
+                  << " allocations in guarded scope!" << std::endl;
+    }
+}
+
+void AllocationGuard::increment_allocation() {
+    global_allocation_count++;
+}
+
+void AllocationGuard::decrement_allocation() {
+    if (global_allocation_count > 0) {
+        global_allocation_count--;
+    }
+}
+
+// MetricsCSV implementation
+void MetricsCSV::write_header() {
+    std::cout << "frame,entities,ms_integrate,ms_total,simd_used,stolen_tasks" << std::endl;
+}
+
+void MetricsCSV::write_row(int frame, 
+                           size_t entities,
+                           double ms_integrate,
+                           double ms_total,
+                           bool simd_used,
+                           int stolen_tasks) {
+    std::cout << frame << ","
+              << entities << ","
+              << std::fixed << std::setprecision(3)
+              << ms_integrate << ","
+              << ms_total << ","
+              << (simd_used ? 1 : 0) << ","
+              << stolen_tasks
+              << std::endl;
+}
+
+} // namespace engine::profiling

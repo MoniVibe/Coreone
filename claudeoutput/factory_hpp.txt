@@ -1,0 +1,37 @@
+#pragma once
+
+#include <flecs.h>
+#include "../components/transform_soa.hpp"
+#include "index_map.hpp"
+
+namespace engine::ecs {
+
+// Simple 3D vector for API
+struct vec3 {
+    float x, y, z;
+    vec3(float x_ = 0, float y_ = 0, float z_ = 0) : x(x_), y(y_), z(z_) {}
+};
+
+// Factory functions for entity creation/destruction
+class EntityFactory {
+public:
+    EntityFactory(flecs::world& w, 
+                  engine::components::TransformSoA& transforms,
+                  IndexMap& index_map);
+    
+    // Spawn movable entity with position, velocity, radius
+    flecs::entity spawn_movable(vec3 pos, vec3 vel, float radius);
+    
+    // Despawn entity and clean up resources
+    void despawn(flecs::entity e);
+    
+    // Reserve capacity for expected entity count
+    void reserve(size_t expected_count);
+    
+private:
+    flecs::world& world;
+    engine::components::TransformSoA& transform_soa;
+    IndexMap& idx_map;
+};
+
+} // namespace engine::ecs

@@ -1,0 +1,177 @@
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+
+// SIMD detection and configuration
+#if defined(__AVX2__)
+    #include <immintrin.h>
+    #define SIMD_AVX2 1
+    #define SIMD_WIDTH 8
+#elif defined(__SSE2__)
+    #include <emmintrin.h>
+    #define SIMD_SSE2 1
+    #define SIMD_WIDTH 4
+#else
+    #define SIMD_SCALAR 1
+    #define SIMD_WIDTH 1
+#endif
+
+namespace engine::simd {
+
+// Type aliases for SIMD vectors
+#if defined(SIMD_AVX2)
+    using vec4 = __m128;
+    using vec8 = __m256;
+    using ivec4 = __m128i;
+    using ivec8 = __m256i;
+#elif defined(SIMD_SSE2)
+    using vec4 = __m128;
+    using ivec4 = __m128i;
+#endif
+
+// --- 4-wide operations (SSE2/AVX2 compatible) ---
+
+inline void load4(float* dst, const float* src) {
+#if defined(SIMD_SSE2) || defined(SIMD_AVX2)
+    _mm_store_ps(dst, _mm_load_ps(src));
+#else
+    std::memcpy(dst, src, 4 * sizeof(float));
+#endif
+}
+
+inline void store4(float* dst, const float* src) {
+#if defined(SIMD_SSE2) || defined(SIMD_AVX2)
+    _mm_store_ps(dst, _mm_load_ps(src));
+#else
+    std::memcpy(dst, src, 4 * sizeof(float));
+#endif
+}
+
+inline void add4(float* dst, const float* a, const float* b) {
+#if defined(SIMD_SSE2) || defined(SIMD_AVX2)
+    vec4 va = _mm_load_ps(a);
+    vec4 vb = _mm_load_ps(b);
+    _mm_store_ps(dst, _mm_add_ps(va, vb));
+#else
+    for (int i = 0; i < 4; ++i) {
+        dst[i] = a[i] + b[i];
+    }
+#endif
+}
+
+inline void mul4(float* dst, const float* a, const float* b) {
+#if defined(SIMD_SSE2) || defined(SIMD_AVX2)
+    vec4 va = _mm_load_ps(a);
+    vec4 vb = _mm_load_ps(b);
+    _mm_store_ps(dst, _mm_mul_ps(va, vb));
+#else
+    for (int i = 0; i < 4; ++i) {
+        dst[i] = a[i] * b[i];
+    }
+#endif
+}
+
+inline void fma4(float* dst, const float* a, const float* b, const float* c) {
+    // dst = a * b + c
+#if defined(SIMD_AVX2)
+    vec4 va = _mm_load_ps(a);
+    vec4 vb = _mm_load_ps(b);
+    vec4 vc = _mm_load_ps(c);
+    _mm_store_ps(dst, _mm_fmadd_ps(va, vb, vc));
+#elif defined(SIMD_SSE2)
+    vec4 va = _mm_load_ps(a);
+    vec4 vb = _mm_load_ps(b);
+    vec4 vc = _mm_load_ps(c);
+    _mm_store_ps(dst, _mm_add_ps(_mm_mul_ps(va, vb), vc));
+#else
+    for (int i = 0; i < 4; ++i) {
+        dst[i] = a[i] * b[i] + c[i];
+    }
+#endif
+}
+
+// Broadcast single value to 4-wide
+inline void broadcast4(float* dst, float value) {
+#if defined(SIMD_SSE2) || defined(SIMD_AVX2)
+    _mm_store_ps(dst, _mm_set1_ps(value));
+#else
+    for (int i = 0; i < 4; ++i) {
+        dst[i] = value;
+    }
+#endif
+}
+
+// --- 8-wide operations (AVX2 only) ---
+
+#if defined(SIMD_AVX2)
+
+inline void load8(float* dst, const float* src) {
+    _mm256_store_ps(dst, _mm256_load_ps(src));
+}
+
+inline void store8(float* dst, const float* src) {
+    _mm256_store_ps(dst, _mm256_load_ps(src));
+}
+
+inline void add8(float* dst, const float* a, const float* b) {
+    vec8 va = _mm256_load_ps(a);
+    vec8 vb = _mm256_load_ps(b);
+    _mm256_store_ps(dst, _mm256_add_ps(va, vb));
+}
+
+inline void mul8(float* dst, const float* a, const float* b) {
+    vec8 va = _mm256_load_ps(a);
+    vec8 vb = _mm256_load_ps(b);
+    _mm256_store_ps(dst, _mm256_mul_ps(va, vb));
+}
+
+inline void fma8(float* dst, const float* a, const float* b, const float* c) {
+    vec8 va = _mm256_load_ps(a);
+    vec8 vb = _mm256_load_ps(b);
+    vec8 vc = _mm256_load_ps(c);
+    _mm256_store_ps(dst, _mm256_fmadd_ps(va, vb, vc));
+}
+
+inline void broadcast8(float* dst, float value) {
+    _mm256_store_ps(dst, _mm256_set1_ps(value));
+}
+
+#endif // SIMD_AVX2
+
+// --- Utility functions ---
+
+// Process range with SIMD, handling alignment and tail
+template<typename Func4, typename FuncScalar>
+inline void process_range(float* dst, const float* src, size_t count,
+                          Func4 simd_func, FuncScalar scalar_func) {
+    size_t simd_count = count & ~3;  // Round down to multiple of 4
+    
+    // Process SIMD portion
+    for (size_t i = 0; i < simd_count; i += 4) {
+        simd_func(dst + i, src + i);
+    }
+    
+    // Process tail
+    for (size_t i = simd_count; i < count; ++i) {
+        scalar_func(dst + i, src + i);
+    }
+}
+
+// Check alignment
+inline bool is_aligned(const void* ptr, size_t alignment) {
+    return (reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0;
+}
+
+// Get SIMD capabilities string
+inline const char* get_simd_string() {
+#if defined(SIMD_AVX2)
+    return "AVX2";
+#elif defined(SIMD_SSE2)
+    return "SSE2";
+#else
+    return "Scalar";
+#endif
+}
+
+} // namespace engine::simd

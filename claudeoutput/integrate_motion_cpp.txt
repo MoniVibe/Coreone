@@ -1,0 +1,226 @@
+#include "integrate_motion.hpp"
+#include "../ecs/factory.hpp"
+#include <immintrin.h>
+#include <chrono>
+#include <algorithm>
+#include <cstring>
+
+namespace engine::systems {
+
+// Check CPU features
+static bool check_avx2_support() {
+    int info[4];
+    __cpuidex(info, 7, 0);
+    return (info[1] & (1 << 5)) != 0; // AVX2 bit
+}
+
+IntegrateMotionSystem::IntegrateMotionSystem(
+    flecs::world& world,
+    engine::components::TransformSoA& transforms,
+    engine::ecs::IndexMap& index_map,
+    engine::job::JobSystem* job_system)
+    : world(world), transform_soa(transforms), idx_map(index_map), job_sys(job_system) {
+}
+
+bool IntegrateMotionSystem::is_simd_available() {
+    static bool avx2_available = check_avx2_support();
+    return avx2_available;
+}
+
+void IntegrateMotionSystem::run(float dt, IntegrationMode mode) {
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+    // Determine actual mode based on availability
+    IntegrationMode actual_mode = mode;
+    if (mode == IntegrationMode::SIMD && !is_simd_available()) {
+        actual_mode = IntegrationMode::SCALAR;
+    }
+    
+    // Query all movable entities
+    size_t total_count = 0;
+    world.query<engine::ecs::Movable, engine::ecs::Velocity>()
+        .each([&](flecs::entity e, engine::ecs::Movable, engine::ecs::Velocity& vel) {
+            total_count++;
+        });
+    
+    if (total_count == 0) {
+        last_frame_ms = 0.0;
+        return;
+    }
+    
+    // Process in chunks for better cache locality
+    constexpr size_t CHUNK_SIZE = 256;
+    auto ranges = split_range(total_count, CHUNK_SIZE);
+    
+    if (job_sys && ranges.size() > 1) {
+        // Parallel execution
+        schedule_integrate(ranges.data(), ranges.size(), dt);
+    } else {
+        // Sequential execution
+        for (const auto& range : ranges) {
+            if (actual_mode == IntegrationMode::SIMD) {
+                integrate_simd(range, dt);
+            } else {
+                integrate_scalar(range, dt);
+            }
+        }
+    }
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    last_frame_ms = std::chrono::duration<double, std::milli>(end_time - start_time).count();
+}
+
+void IntegrateMotionSystem::integrate_simd(const Range& range, float dt) {
+    // Process 8 entities at a time with AVX2
+    const size_t simd_width = 8;
+    const __m256 dt_vec = _mm256_set1_ps(dt);
+    
+    size_t processed = 0;
+    std::vector<flecs::entity> entities;
+    std::vector<engine::ecs::Velocity*> velocities;
+    
+    // Gather entities and velocities
+    world.query<engine::ecs::Movable, engine::ecs::Velocity>()
+        .each([&](flecs::entity e, engine::ecs::Movable, engine::ecs::Velocity& vel) {
+            if (processed >= range.start && processed < range.start + range.count) {
+                entities.push_back(e);
+                velocities.push_back(&vel);
+            }
+            processed++;
+        });
+    
+    // Process in SIMD chunks
+    size_t i = 0;
+    for (; i + simd_width <= entities.size(); i += simd_width) {
+        // Gather positions and velocities
+        alignas(32) float pos_x[8], pos_y[8], pos_z[8];
+        alignas(32) float vel_x[8], vel_y[8], vel_z[8];
+        
+        for (size_t j = 0; j < simd_width; j++) {
+            auto idx_opt = idx_map.get(entities[i + j]);
+            if (idx_opt.has_value()) {
+                size_t idx = idx_opt.value();
+                transform_soa.getPosition(idx, pos_x[j], pos_y[j], pos_z[j]);
+                vel_x[j] = velocities[i + j]->x;
+                vel_y[j] = velocities[i + j]->y;
+                vel_z[j] = velocities[i + j]->z;
+            }
+        }
+        
+        // SIMD integration
+        __m256 px = _mm256_load_ps(pos_x);
+        __m256 py = _mm256_load_ps(pos_y);
+        __m256 pz = _mm256_load_ps(pos_z);
+        
+        __m256 vx = _mm256_load_ps(vel_x);
+        __m256 vy = _mm256_load_ps(vel_y);
+        __m256 vz = _mm256_load_ps(vel_z);
+        
+        // pos += vel * dt
+        px = _mm256_fmadd_ps(vx, dt_vec, px);
+        py = _mm256_fmadd_ps(vy, dt_vec, py);
+        pz = _mm256_fmadd_ps(vz, dt_vec, pz);
+        
+        // Store results
+        _mm256_store_ps(pos_x, px);
+        _mm256_store_ps(pos_y, py);
+        _mm256_store_ps(pos_z, pz);
+        
+        // Write back to SoA
+        for (size_t j = 0; j < simd_width; j++) {
+            auto idx_opt = idx_map.get(entities[i + j]);
+            if (idx_opt.has_value()) {
+                size_t idx = idx_opt.value();
+                transform_soa.setPosition(idx, pos_x[j], pos_y[j], pos_z[j]);
+            }
+        }
+    }
+    
+    // Handle tail with scalar code
+    for (; i < entities.size(); i++) {
+        auto idx_opt = idx_map.get(entities[i]);
+        if (idx_opt.has_value()) {
+            size_t idx = idx_opt.value();
+            float px, py, pz;
+            transform_soa.getPosition(idx, px, py, pz);
+            
+            px += velocities[i]->x * dt;
+            py += velocities[i]->y * dt;
+            pz += velocities[i]->z * dt;
+            
+            transform_soa.setPosition(idx, px, py, pz);
+        }
+    }
+}
+
+void IntegrateMotionSystem::integrate_scalar(const Range& range, float dt) {
+    size_t processed = 0;
+    
+    world.query<engine::ecs::Movable, engine::ecs::Velocity>()
+        .each([&](flecs::entity e, engine::ecs::Movable, engine::ecs::Velocity& vel) {
+            if (processed >= range.start && processed < range.start + range.count) {
+                auto idx_opt = idx_map.get(e);
+                if (idx_opt.has_value()) {
+                    size_t idx = idx_opt.value();
+                    
+                    float px, py, pz;
+                    transform_soa.getPosition(idx, px, py, pz);
+                    
+                    px += vel.x * dt;
+                    py += vel.y * dt;
+                    pz += vel.z * dt;
+                    
+                    transform_soa.setPosition(idx, px, py, pz);
+                }
+            }
+            processed++;
+        });
+}
+
+void IntegrateMotionSystem::schedule_integrate(const Range* ranges, int n_ranges, float dt) {
+    if (!job_sys) {
+        // Fallback to sequential
+        for (int i = 0; i < n_ranges; i++) {
+            if (is_simd_available()) {
+                integrate_simd(ranges[i], dt);
+            } else {
+                integrate_scalar(ranges[i], dt);
+            }
+        }
+        return;
+    }
+    
+    // Submit parallel jobs
+    std::vector<engine::job::JobHandle> handles;
+    handles.reserve(n_ranges);
+    
+    for (int i = 0; i < n_ranges; i++) {
+        auto job = [this, range = ranges[i], dt]() {
+            if (is_simd_available()) {
+                integrate_simd(range, dt);
+            } else {
+                integrate_scalar(range, dt);
+            }
+        };
+        
+        handles.push_back(job_sys->submit(job));
+    }
+    
+    // Wait for all jobs to complete
+    job_sys->wait_all(handles);
+}
+
+std::vector<Range> IntegrateMotionSystem::split_range(size_t total_count, size_t chunk_size) {
+    std::vector<Range> ranges;
+    
+    for (size_t i = 0; i < total_count; i += chunk_size) {
+        Range r;
+        r.start = i;
+        r.count = std::min(chunk_size, total_count - i);
+        ranges.push_back(r);
+    }
+    
+    return ranges;
+}
+
+} // namespace engine::systems

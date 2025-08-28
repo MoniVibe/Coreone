@@ -1,0 +1,177 @@
+#include "velocity_soa.hpp"
+#include <algorithm>
+#include <new>
+
+namespace engine::components {
+
+VelocitySoA::VelocitySoA(std::pmr::monotonic_buffer_resource* resource)
+    : memory(resource), allocator(resource) {
+}
+
+VelocitySoA::~VelocitySoA() {
+    deallocate();
+}
+
+VelocitySoA::VelocitySoA(VelocitySoA&& other) noexcept
+    : allocator(std::pmr::get_default_resource()) {
+    moveFrom(std::move(other));
+}
+
+VelocitySoA& VelocitySoA::operator=(VelocitySoA&& other) noexcept {
+    if (this != &other) {
+        deallocate();
+        moveFrom(std::move(other));
+    }
+    return *this;
+}
+
+void* VelocitySoA::allocateAligned(size_t size) {
+    // Allocate with extra space for alignment
+    size_t alignedSize = size + ALIGNMENT - 1;
+    void* raw = allocator.allocate(alignedSize);
+    
+    // Align the pointer
+    size_t addr = reinterpret_cast<size_t>(raw);
+    size_t aligned = (addr + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+    
+    assert((aligned & (ALIGNMENT - 1)) == 0);
+    return reinterpret_cast<void*>(aligned);
+}
+
+void VelocitySoA::reserve(size_t n) {
+    if (n <= capacity) return;
+    
+    // Round up to multiple of 16 for better SIMD
+    n = (n + 15) & ~15;
+    
+    // Allocate new arrays
+    size_t floatBytes = n * sizeof(float);
+    
+    float* newVx = static_cast<float*>(allocateAligned(floatBytes));
+    float* newVy = static_cast<float*>(allocateAligned(floatBytes));
+    float* newVz = static_cast<float*>(allocateAligned(floatBytes));
+    
+    // Copy existing data
+    if (count > 0) {
+        std::memcpy(newVx, vx, count * sizeof(float));
+        std::memcpy(newVy, vy, count * sizeof(float));
+        std::memcpy(newVz, vz, count * sizeof(float));
+    }
+    
+    // Zero new elements
+    std::memset(newVx + count, 0, (n - count) * sizeof(float));
+    std::memset(newVy + count, 0, (n - count) * sizeof(float));
+    std::memset(newVz + count, 0, (n - count) * sizeof(float));
+    
+    // Update pointers
+    vx = newVx;
+    vy = newVy;
+    vz = newVz;
+    
+    capacity = n;
+}
+
+void VelocitySoA::deallocate() {
+    // PMR handles deallocation through resource
+    vx = vy = vz = nullptr;
+    capacity = count = 0;
+}
+
+void VelocitySoA::moveFrom(VelocitySoA&& other) noexcept {
+    vx = other.vx;
+    vy = other.vy;
+    vz = other.vz;
+    
+    count = other.count;
+    capacity = other.capacity;
+    memory = other.memory;
+    allocator = std::move(other.allocator);
+    
+    other.vx = other.vy = other.vz = nullptr;
+    other.count = other.capacity = 0;
+}
+
+void VelocitySoA::getVelocity(size_t i, float& x, float& y, float& z) const {
+    assert(valid(i));
+    x = vx[i];
+    y = vy[i];
+    z = vz[i];
+}
+
+void VelocitySoA::setVelocity(size_t i, float x, float y, float z) {
+    assert(valid(i));
+    vx[i] = x;
+    vy[i] = y;
+    vz[i] = z;
+}
+
+void VelocitySoA::loadAligned4(size_t i, float* dst) const {
+    assert(valid(i + 3));  // Ensure 4 elements available
+    assert(((uintptr_t)dst & 31) == 0);  // Check dst alignment
+    
+    // Load 4 consecutive velocities
+    std::memcpy(dst + 0, vx + i, 4 * sizeof(float));
+    std::memcpy(dst + 4, vy + i, 4 * sizeof(float));
+    std::memcpy(dst + 8, vz + i, 4 * sizeof(float));
+}
+
+void VelocitySoA::storeAligned4(size_t i, const float* src) {
+    assert(valid(i + 3));  // Ensure 4 elements available
+    assert(((uintptr_t)src & 31) == 0);  // Check src alignment
+    
+    // Store 4 consecutive velocities
+    std::memcpy(vx + i, src + 0, 4 * sizeof(float));
+    std::memcpy(vy + i, src + 4, 4 * sizeof(float));
+    std::memcpy(vz + i, src + 8, 4 * sizeof(float));
+}
+
+size_t VelocitySoA::add(float x, float y, float z) {
+    if (count >= capacity) {
+        reserve(capacity == 0 ? 64 : capacity * 2);
+    }
+    
+    size_t idx = count++;
+    vx[idx] = x;
+    vy[idx] = y;
+    vz[idx] = z;
+    
+    return idx;
+}
+
+void VelocitySoA::remove(size_t i) {
+    assert(valid(i));
+    if (i == count - 1) {
+        // Last element, just decrement count
+        --count;
+        return;
+    }
+    
+    // Swap with last element
+    size_t last = count - 1;
+    vx[i] = vx[last];
+    vy[i] = vy[last];
+    vz[i] = vz[last];
+    
+    --count;
+}
+
+void VelocitySoA::zeroAll() {
+    if (count > 0) {
+        std::memset(vx, 0, count * sizeof(float));
+        std::memset(vy, 0, count * sizeof(float));
+        std::memset(vz, 0, count * sizeof(float));
+    }
+}
+
+void VelocitySoA::verifyAlignment() const {
+    auto check = [](const void* p, const char* name) {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+        assert((addr & (ALIGNMENT - 1)) == 0);
+    };
+    
+    check(vx, "vx");
+    check(vy, "vy");
+    check(vz, "vz");
+}
+
+} // namespace engine::components

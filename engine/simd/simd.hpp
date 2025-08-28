@@ -1,5 +1,5 @@
 #pragma once
-#ifdef ENABLE_SIMD
+#if ENABLE_SIMD
 #  ifdef _MSC_VER
 #    include <immintrin.h>
 #  else

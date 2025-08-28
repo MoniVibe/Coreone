@@ -1,0 +1,61 @@
+#pragma once
+
+#include <flecs.h>
+#include "../components/transform_soa.hpp"
+#include "index_map.hpp"
+#include "../job/job_system.hpp"
+#include <vector>
+
+namespace engine::systems {
+
+// Range of entities to process
+struct Range {
+    size_t start;
+    size_t count;
+};
+
+// Integration mode flags
+enum class IntegrationMode {
+    SIMD,    // Use SIMD instructions
+    SCALAR   // Use scalar fallback
+};
+
+// Motion integration system
+class IntegrateMotionSystem {
+public:
+    IntegrateMotionSystem(flecs::world& world,
+                          engine::components::TransformSoA& transforms,
+                          engine::ecs::IndexMap& index_map,
+                          engine::job::JobSystem* job_system = nullptr);
+    
+    // Run integration for all movable entities
+    void run(float dt, IntegrationMode mode = IntegrationMode::SIMD);
+    
+    // Schedule parallel integration
+    void schedule_integrate(const Range* ranges, int n_ranges, float dt);
+    
+    // Get last frame timing
+    double get_last_frame_ms() const { return last_frame_ms; }
+    
+    // Check if SIMD is available
+    static bool is_simd_available();
+    
+private:
+    flecs::world& world;
+    engine::components::TransformSoA& transform_soa;
+    engine::ecs::IndexMap& idx_map;
+    engine::job::JobSystem* job_sys;
+    
+    double last_frame_ms = 0.0;
+    
+    // SIMD integration path
+    void integrate_simd(const Range& range, float dt);
+    
+    // Scalar integration path
+    void integrate_scalar(const Range& range, float dt);
+    
+    // Split range for parallel processing
+    std::vector<Range> split_range(size_t total_count, size_t chunk_size);
+};
+
+} // namespace engine::systems

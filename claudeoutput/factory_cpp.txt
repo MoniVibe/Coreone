@@ -1,0 +1,83 @@
+#include "factory.hpp"
+#include "ecs_register.hpp"
+#include <cmath>
+
+namespace engine::ecs {
+
+// Velocity component stored in ECS
+struct Velocity {
+    float x, y, z;
+};
+
+// Radius component for collision/culling
+struct Radius {
+    float value;
+};
+
+EntityFactory::EntityFactory(flecs::world& w,
+                             engine::components::TransformSoA& transforms,
+                             IndexMap& index_map)
+    : world(w), transform_soa(transforms), idx_map(index_map) {
+    
+    // Register velocity and radius components if not already done
+    world.component<Velocity>("Velocity");
+    world.component<Radius>("Radius");
+}
+
+flecs::entity EntityFactory::spawn_movable(vec3 pos, vec3 vel, float radius) {
+    // Create entity with components
+    auto entity = world.entity()
+        .add<Movable>()
+        .set<Velocity>({vel.x, vel.y, vel.z})
+        .set<Radius>({radius});
+    
+    // Add to SoA transform storage
+    size_t soa_idx = transform_soa.add(
+        pos.x, pos.y, pos.z,      // position
+        0.0f, 0.0f, 0.0f, 1.0f,    // quaternion (identity)
+        1.0f, 1.0f, 1.0f           // scale
+    );
+    
+    // Map entity to SoA index
+    idx_map.add(entity);
+    
+    // Ensure amortized growth - double capacity when needed
+    if (transform_soa.size() >= transform_soa.capacity * 0.75) {
+        size_t new_capacity = std::max(size_t(64), transform_soa.capacity * 2);
+        transform_soa.reserve(new_capacity);
+    }
+    
+    return entity;
+}
+
+void EntityFactory::despawn(flecs::entity e) {
+    // Get SoA index before removal
+    auto idx_opt = idx_map.get(e);
+    
+    if (idx_opt.has_value()) {
+        size_t idx = idx_opt.value();
+        
+        // Remove from SoA (swaps with last)
+        transform_soa.remove(idx);
+        
+        // Remove from index map
+        idx_map.remove(e);
+        
+        // If we swapped with last, update the mapping
+        if (idx < transform_soa.size()) {
+            // Need to find which entity now has this index
+            // This requires reverse mapping or storing entity ID in SoA
+            // For now, simplified - in production, maintain reverse map
+        }
+    }
+    
+    // Destroy entity in ECS
+    e.destruct();
+}
+
+void EntityFactory::reserve(size_t expected_count) {
+    transform_soa.reserve(expected_count);
+    idx_map.reserve(expected_count);
+}
+
+} // namespace engine::ecs

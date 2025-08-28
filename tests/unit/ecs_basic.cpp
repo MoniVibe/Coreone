@@ -1,4 +1,7 @@
-#include <cstdio>
-int main(){ std::puts("ecs_basic stub"); return 0; }
+#include <doctest/doctest.h>
+
+TEST_CASE("ecs_basic stub") {
+  CHECK(true);
+}
 
 
