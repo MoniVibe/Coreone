@@ -1,0 +1,19 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - name: Configure
+        run: cmake --preset ${{ runner.os == 'Windows' && 'win-msvc' || 'linux-clang' }}
+      - name: Build
+        run: cmake --build --preset ${{ runner.os == 'Windows' && 'win-msvc' || 'linux-clang' }} --target engine_app unit_tests -j 8
+      - name: Test
+        run: ctest --preset ${{ runner.os == 'Windows' && 'win-msvc' || 'linux-clang' }} --output-on-failure
+
+

@@ -1,0 +1,18 @@
+# build
+/build/
+/out/
+/.cache/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# tools
+/artifacts/
+/.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+

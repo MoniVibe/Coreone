@@ -1,0 +1,24 @@
+[submodule "third_party/flecs"]
+	path = third_party/flecs
+	url = https://github.com/SanderMertens/flecs
+[submodule "third_party/bx"]
+	path = third_party/bx
+	url = https://github.com/bkaradzic/bx
+[submodule "third_party/bimg"]
+	path = third_party/bimg
+	url = https://github.com/bkaradzic/bimg
+[submodule "third_party/bgfx"]
+	path = third_party/bgfx
+	url = https://github.com/bkaradzic/bgfx
+[submodule "third_party/glm"]
+	path = third_party/glm
+	url = https://github.com/g-truc/glm
+[submodule "third_party/doctest"]
+	path = third_party/doctest
+	url = https://github.com/doctest/doctest
+[submodule "third_party/fmt"]
+	path = third_party/fmt
+	url = https://github.com/fmtlib/fmt
+[submodule "third_party/glfw"]
+	path = third_party/glfw
+	url = https://github.com/glfw/glfw

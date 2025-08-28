@@ -1,0 +1,39 @@
+{
+  "version": 5,
+  "configurePresets": [
+    {
+      "name": "win-msvc",
+      "generator": "Ninja",
+      "binaryDir": "build/win-msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_RENDER": "OFF",
+        "ENABLE_AVX2": "ON"
+      }
+    },
+    {
+      "name": "linux-clang",
+      "generator": "Ninja",
+      "binaryDir": "build/linux-clang",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "ENABLE_TESTS": "ON",
+        "ENABLE_RENDER": "OFF",
+        "ENABLE_AVX2": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "win-msvc", "configurePreset": "win-msvc" },
+    { "name": "linux-clang", "configurePreset": "linux-clang" }
+  ],
+  "testPresets": [
+    { "name": "win-msvc", "configurePreset": "win-msvc" },
+    { "name": "linux-clang", "configurePreset": "linux-clang" }
+  ]
+}
+
+
